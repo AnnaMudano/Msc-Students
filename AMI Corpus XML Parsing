@@ -1,0 +1,207 @@
+from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
+import re
+import pandas as pd
+
+
+''' This function takes a dialogue act (DA) file and returns a list containing lists of
+ tuples for each dialogue act (similar to a sentence). The tuples are of the form
+ ( KEY - used to group by DA, SPEAKER - a,b,c,or d, START TIME - integer, WORD - single word string, 
+ WORD ID - e.g. all in the form 'ES2002b.B.words8') '''
+ 
+def DAfile(dfile,speaker):
+    dlist = []
+    soup = BeautifulSoup(open(dfile,'r'),'lxml')
+    D_Acts = soup.find_all('dact')
+
+    for D_A in D_Acts:
+        for tag in D_A.find_all(re.compile("^nite:child")):
+            wordrange = str(tag).split('#id(')[1].split('">')[0]
+            
+            if len(wordrange)>20:
+                dlist.append(wordrange.split(')..id(')[0])
+                
+            else:
+                
+                dlist.append(wordrange.split(')..id(')[0].split(')')[0])
+    
+    wfile = dfile.split('dialog')[0] + 'words.xml'
+    soup = BeautifulSoup(open(wfile,"r"),'lxml')
+    words = soup.find_all(['w','vocalsound','disfmarker','gap'])
+    
+    key = 0
+    w_list = []
+    temp_list = []
+    for word in words: 
+        if word['nite:id'] in dlist:
+            key += 1
+            temp_list = []
+            
+        if str(word.name) == 'disfmarker':
+            temp_list.append((key, speaker, float(word['starttime']), "[disfmarker]", word['nite:id']))
+        if str(word.name) == 'vocalsound':
+            temp_list.append((key, speaker, float(word['starttime']), "[vocalsound]", word['nite:id']))
+        if str(word.name) == 'gap':
+            temp_list.append((key, speaker, float(word['starttime']), "[gap]", word['nite:id']))
+        if str(word.name) == 'w':
+            temp_list.append((key, speaker, float(word['starttime']), word.get_text(), word['nite:id']))
+         
+        if word['nite:id'] in dlist:
+            w_list.append(temp_list)
+             
+    return(w_list)
+
+
+def sort_lists(list_a):
+    return list_a[0][2]
+
+
+'''This function returns the word IDs of the start of a decision and the end of a decision '''
+
+def Dec_Parse(pname): 
+    decfile = pname + '.decision.xml'
+    tree = ET.parse(open(decfile,'r'))
+    root = tree.getroot()
+    declist = []
+    for decs in root:
+        declist.append([dec.attrib.get('href').split('#id(')[1] for dec in decs])
+    
+    start_dec = []
+    end_dec = []
+    
+    for dec in declist: #dec is a list of strings e.g. 'ES2009c.A.words604)..id(ES2009c.A.words638)'
+        index = len(dec)
+        
+        if len(dec[0].split(')')) == 2:
+            start = dec[0].split(')')[0]
+        else:    
+            start = dec[0].split(')..id(')[0]
+        
+        if len(dec[index-1].split(')')) == 2:
+            end = dec[index-1].split(')')[0]
+        else:  
+            end = dec[index-1].split(')..id(')[1].split(')')[0] 
+        
+
+        start_dec.append(start)   
+        end_dec.append(end)
+
+    return(start_dec, end_dec)
+
+
+'''This function uses the dialogue acts and decision start and end points to output the 
+transcript to a text file and puts a marker of [start_dec] and [end_dec] to indicate
+decision segments.
+Can be edited to include the speaker at each point. '''
+
+def WriteTranscript(pname):
+    start_dec, end_dec = Dec_Parse(pname)
+      
+    all_dialog = []
+    
+    for speaker in ['A','B','C','D']:
+        fname = pname + '.' + speaker + '.dialog-act.xml'
+        all_dialog += DAfile(fname, speaker)
+
+    all_dialog.sort(key=sort_lists)
+     
+    output = ''
+    for d_a in all_dialog:
+        for (k, s, t, w, wk) in d_a:
+            if wk in start_dec:
+                output += '[start_dec]' + '\n' ' ' + w + ' '
+            if wk in end_dec:
+                output += w + '\n' + '[end_dec]' 
+            else:
+                output += w + ' ' 
+        output += '\n'
+
+    with open(pname+'_entire_dialog_annotated.txt', 'w') as out:
+        out.write(output)
+
+'''This function creates a dataframe of each word, whether or not it is part of a decision
+ segment (1 - yes, 0 - no), and the meeting ID (e.g ES2002a) '''
+
+def word_df(name):
+    words = []
+
+    with open(name + '_entire_dialog_annotated.txt', 'r') as f:
+        lines = f.readlines()
+        for line in lines:
+            for word in line.split():
+                words.append(word)
+     
+    meeting_ID = [name for i in range(len(words))]
+    
+    is_decision_part = 0
+    classification = []
+    for word in words:
+        if word == '[start_dec]':
+            is_decision_part = 1
+        elif word == '[end_dec]':
+            is_decision_part = 0
+        classification.append(is_decision_part)
+ 
+    df_data = list(zip(words,classification, meeting_ID))
+    
+    df = pd.DataFrame(data=df_data, columns=['Word', 'Decision_Seg', 'Meeting_ID']) 
+    return(df)
+
+
+'''This function works the same as the one above but at the sentence level'''
+
+def sentence_df(name):
+    sentences = []    
+    
+    with open(name + '_entire_dialog_annotated.txt', 'r') as f:
+        lines = f.readlines()
+        for line in lines:
+            sentences.append(line)
+    
+    meeting_ID = [name for i in range(len(sentences))]
+            
+    is_decision_part = 0
+    classification = []
+    for s in sentences:
+        if s == '[start_dec]\n':
+            is_decision_part = 1
+        elif s == '[end_dec]\n':
+            is_decision_part = 0
+        classification.append(is_decision_part)
+    
+    df_data = list(zip(sentences, classification, meeting_ID)) 
+    
+    df = pd.DataFrame(data = df_data, columns = ['Sentence', 'Decision_Seg', 'Meeting_ID'])
+    return(df) 
+
+
+#All the meeting IDs which have decision annotations
+dec_files=['ES2002a', 'ES2002d', 'ES2006a', 'ES2006c', 'ES2009a', 'ES2009b', 'ES2009c', 'ES2010b', 'ES2010c', 'ES2010d', 'ES2012c', 'ES2012d', 'ES2015a', 'ES2015b', 'ES2015c', 'ES2015d', 'ES2016a', 'ES2016b', 'ES2016c', 'ES2016d', 'IS1000a', 'IS1001b', 'IS1003a', 'IS1003b', 'IS1003c', 'IS1004a', 'IS1004b', 'IS1004c', 'IS1004d', 'IS1005a', 'IS1006a', 'IS1006b', 'IS1006c', 'IS1006d', 'IS1008a', 'IS1008b', 'IS1008c', 'IS1008d', 'TS3004a', 'TS3004b', 'TS3005a', 'TS3005b', 'TS3005c', 'TS3005d', 'TS3007a']
+ 
+ 
+'''This function adds all the sentences and words to 2 separate csv files for words and
+ sentences'''
+  
+def main(files):
+    
+    first_file = files[0]
+    WriteTranscript(first_file)
+    
+    s_df = sentence_df(first_file)
+    w_df = word_df(first_file)
+    s_df.to_csv('sentences.csv')
+    w_df.to_csv('words.csv')
+    
+    for file in dec_files[1:]:
+        WriteTranscript(file)
+        
+        with open('sentences.csv', 'a') as f:
+            (sentence_df(file)).to_csv(f, mode = 'a', header = False)
+    
+        with open('words.csv', 'a') as f:
+            word_df(file).to_csv(f, mode = 'a', header = False)
+
+
+
+'''Run to get csv files'''                                        
+main(dec_files)
